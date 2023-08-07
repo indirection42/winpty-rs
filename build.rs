@@ -1,12 +1,9 @@
-#[cfg(windows)]
-use windows::Win32::System::LibraryLoader::{GetProcAddress, GetModuleHandleW};
-#[cfg(windows)]
-use windows::core::{PWSTR, PSTR, PCWSTR, PCSTR, HSTRING};
 use std::i64;
 use std::process::Command;
 use std::str;
-use which::which;
-
+#[cfg(windows)]
+use windows::core::{PCSTR, PCWSTR, PSTR, PWSTR};
+#[cfg(windows)]
 #[cfg(windows)]
 trait IntoPWSTR {
     fn into_pwstr(self) -> PWSTR;
@@ -30,10 +27,7 @@ trait IntoPCWSTR {
 #[cfg(windows)]
 impl IntoPCWSTR for &str {
     fn into_pcwstr(self) -> PCWSTR {
-        let encoded = self
-            .encode_utf16()
-            .chain([0u16])
-            .collect::<Vec<u16>>();
+        let encoded = self.encode_utf16().chain([0u16]).collect::<Vec<u16>>();
 
         PCWSTR(encoded.as_ptr())
     }
@@ -42,17 +36,15 @@ impl IntoPCWSTR for &str {
 #[cfg(windows)]
 impl IntoPWSTR for &str {
     fn into_pwstr(self) -> PWSTR {
-        let mut encoded = self
-            .encode_utf16()
-            .chain([0u16])
-            .collect::<Vec<u16>>();
+        let mut encoded = self.encode_utf16().chain([0u16]).collect::<Vec<u16>>();
 
-        PWSTR(encoded.as_mut_ptr())    }
+        PWSTR(encoded.as_mut_ptr())
+    }
 }
 
 #[cfg(windows)]
 impl IntoPSTR for &str {
-     fn into_pstr(self) -> PSTR {
+    fn into_pstr(self) -> PSTR {
         let mut encoded = self
             .as_bytes()
             .iter()
@@ -60,29 +52,28 @@ impl IntoPSTR for &str {
             .chain([0u8])
             .collect::<Vec<u8>>();
 
-        PSTR(encoded.as_mut_ptr())    }
+        PSTR(encoded.as_mut_ptr())
+    }
 }
 
 #[cfg(windows)]
 impl IntoPCSTR for &str {
     fn into_pcstr(self) -> PCSTR {
-       let encoded = self
-           .as_bytes()
-           .iter()
-           .cloned()
-           .chain([0u8])
-           .collect::<Vec<u8>>();
+        let encoded = self
+            .as_bytes()
+            .iter()
+            .cloned()
+            .chain([0u8])
+            .collect::<Vec<u8>>();
 
-       PCSTR(encoded.as_ptr())    }
+        PCSTR(encoded.as_ptr())
+    }
 }
 
 #[cfg(windows)]
 impl IntoPWSTR for String {
     fn into_pwstr(self) -> PWSTR {
-        let mut encoded = self
-            .encode_utf16()
-            .chain([0u16])
-            .collect::<Vec<u16>>();
+        let mut encoded = self.encode_utf16().chain([0u16]).collect::<Vec<u16>>();
 
         PWSTR(encoded.as_mut_ptr())
     }
@@ -111,12 +102,12 @@ fn main() {
         // println!("cargo:rerun-if-changed=src/native.rs");
         // println!("cargo:rerun-if-changed=src/csrc");
         println!("cargo:rerun-if-changed=src/");
-
         // let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         // let include_path = Path::new(&manifest_dir).join("include");
         // CFG.exported_header_dirs.push(&include_path);
         // CFG.exported_header_dirs.push(&Path::new(&manifest_dir));
         // Check if ConPTY is enabled
+
         let reg_entry = "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
 
         let major_version = command_output(
@@ -143,55 +134,64 @@ fn main() {
         println!("Windows major version: {:?}", major_version);
         println!("Windows build number: {:?}", build_version);
 
-        let conpty_enabled;
-        let kernel32_res = unsafe { GetModuleHandleW(&HSTRING::from("kernel32.dll")) };
-        let kernel32 = kernel32_res.unwrap();
+        #[cfg(feature = "conpty")]
+        {
+            use windows::core::HSTRING;
+            use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+            let conpty_enabled;
+            let kernel32_res = unsafe { GetModuleHandleW(&HSTRING::from("kernel32.dll")) };
+            let kernel32 = kernel32_res.unwrap();
 
-        let conpty = unsafe { GetProcAddress(kernel32,  "CreatePseudoConsole".into_pcstr()) };
-        match conpty {
-            Some(_) => {
-                conpty_enabled = "1";
-                println!("cargo:rustc-cfg=feature=\"conpty\"")
+            let conpty = unsafe { GetProcAddress(kernel32, "CreatePseudoConsole".into_pcstr()) };
+            match conpty {
+                Some(_) => {
+                    conpty_enabled = "1";
+                    println!("cargo:rustc-cfg=feature=\"conpty\"")
+                }
+                None => {
+                    conpty_enabled = "0";
+                }
             }
-            None => {
-                conpty_enabled = "0";
-            }
+
+            println!("ConPTY enabled: {}", conpty_enabled);
         }
-
-        println!("ConPTY enabled: {}", conpty_enabled);
 
         // Check if winpty is installed
-        let mut cmd = Command::new("winpty-agent");
-        let mut winpty_enabled = "0";
-        if command_ok(cmd.arg("--version")) {
-            // let winpty_path = cm
-            winpty_enabled = "1";
-            let winpty_version = command_output(cmd.arg("--version"));
-            println!("Using Winpty version: {}", &winpty_version);
+        #[cfg(feature = "winpty")]
+        {
+            use which::which;
+            let mut cmd = Command::new("winpty-agent");
+            let mut winpty_enabled = "0";
+            if command_ok(cmd.arg("--version")) {
+                // let winpty_path = cm
+                winpty_enabled = "1";
+                let winpty_version = command_output(cmd.arg("--version"));
+                println!("Using Winpty version: {}", &winpty_version);
 
-            let winpty_location = which("winpty-agent").unwrap();
-            let winpty_path = winpty_location.parent().unwrap();
-            let winpty_root = winpty_path.parent().unwrap();
-            // let winpty_include = winpty_root.join("include");
+                let winpty_location = which("winpty-agent").unwrap();
+                let winpty_path = winpty_location.parent().unwrap();
+                let winpty_root = winpty_path.parent().unwrap();
+                // let winpty_include = winpty_root.join("include");
 
-            let winpty_lib = winpty_root.join("lib");
+                let winpty_lib = winpty_root.join("lib");
 
-            println!(
-                "cargo:rustc-link-search=native={}",
-                winpty_lib.to_str().unwrap()
-            );
-            println!(
-                "cargo:rustc-link-search=native={}",
-                winpty_path.to_str().unwrap()
-            );
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    winpty_lib.to_str().unwrap()
+                );
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    winpty_path.to_str().unwrap()
+                );
 
-            println!("cargo:rustc-cfg=feature=\"winpty\"")
+                println!("cargo:rustc-cfg=feature=\"winpty\"")
 
-            // CFG.exported_header_dirs.push(&winpty_include);
-        }
+                // CFG.exported_header_dirs.push(&winpty_include);
+            }
 
-        if winpty_enabled == "1" {
-            println!("cargo:rustc-link-lib=dylib=winpty");
+            if winpty_enabled == "1" {
+                println!("cargo:rustc-link-lib=dylib=winpty");
+            }
         }
     }
 }
