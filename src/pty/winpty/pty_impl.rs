@@ -1,23 +1,22 @@
-/// Actual WinPTY backend implementation.
-
-use windows::Win32::Foundation::{HANDLE};
-use windows::core::{PCWSTR};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_GENERIC_READ, FILE_SHARE_NONE,
-    OPEN_EXISTING, FILE_GENERIC_WRITE,
-    FILE_ATTRIBUTE_NORMAL};
 use num_traits::ToPrimitive;
+use windows::core::PCWSTR;
+/// Actual WinPTY backend implementation.
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_NONE,
+    OPEN_EXISTING,
+};
 
-use std::ptr;
+use std::ffi::{c_void, OsString};
 use std::mem::MaybeUninit;
-use std::slice::from_raw_parts;
-use std::ffi::{OsString, c_void};
-use std::os::windows::prelude::*;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::prelude::*;
+use std::ptr;
+use std::slice::from_raw_parts;
 
 use super::bindings::*;
-use crate::pty::{PTYProcess, PTYImpl};
 use crate::pty::PTYArgs;
+use crate::pty::{PTYImpl, PTYProcess};
 
 struct WinPTYPtr {
     ptr: *mut winpty_t,
@@ -39,7 +38,13 @@ impl WinPTYPtr {
         unsafe { winpty_conout_name(self.ptr) }
     }
 
-    pub fn spawn(&self, appname: *const u16, cmdline: *const u16, cwd: *const u16, env: *const u16) -> Result<HANDLE, OsString> {
+    pub fn spawn(
+        &self,
+        appname: *const u16,
+        cmdline: *const u16,
+        cwd: *const u16,
+        env: *const u16,
+    ) -> Result<HANDLE, OsString> {
         let mut err_ptr: *mut winpty_error_ptr_t = ptr::null_mut();
         unsafe {
             let spawn_config = winpty_spawn_config_new(3u64, appname, cmdline, cwd, env, err_ptr);
@@ -55,8 +60,14 @@ impl WinPTYPtr {
             let mut handle = ptr::addr_of_mut!((*handle_value.as_mut_ptr())) as *mut c_void;
             //let handle_value = process.0 as *mut c_void;
             //let process: *mut *mut  = ptr::null_mut();
-            let succ = winpty_spawn(self.ptr, spawn_config, ptr::addr_of_mut!(handle), ptr::null_mut::<_>(),
-                                    ptr::null_mut::<u32>(), err_ptr);
+            let succ = winpty_spawn(
+                self.ptr,
+                spawn_config,
+                ptr::addr_of_mut!(handle),
+                ptr::null_mut::<_>(),
+                ptr::null_mut::<u32>(),
+                err_ptr,
+            );
             winpty_spawn_config_free(spawn_config);
             if !succ {
                 return Err(get_error_message(err_ptr));
@@ -90,7 +101,6 @@ impl Drop for WinPTYPtr {
 unsafe impl Send for WinPTYPtr {}
 unsafe impl Sync for WinPTYPtr {}
 
-
 // struct WinPTYError {
 //     ptr: *mut winpty_error_t
 // }
@@ -115,18 +125,16 @@ unsafe fn get_error_message(err_ptr: *mut winpty_error_ptr_t) -> OsString {
     while *ptr != 0 {
         size += 1;
         ptr = ptr.wrapping_offset(1);
-
     }
     let msg_slice: &[u16] = from_raw_parts(err_msg, size);
     winpty_error_free(err_ptr);
     OsString::from_wide(msg_slice)
 }
 
-
 /// FFi-safe wrapper around `winpty` library calls and objects.
 pub struct WinPTY {
     ptr: WinPTYPtr,
-    process: PTYProcess
+    process: PTYProcess,
 }
 
 impl PTYImpl for WinPTY {
@@ -144,7 +152,9 @@ impl PTYImpl for WinPTY {
 
             if args.cols <= 0 || args.rows <= 0 {
                 let err: OsString = OsString::from(format!(
-                    "PTY cols and rows must be positive and non-zero. Got: ({}, {})", args.cols, args.rows));
+                    "PTY cols and rows must be positive and non-zero. Got: ({}, {})",
+                    args.cols, args.rows
+                ));
                 return Err(err);
             }
 
@@ -170,8 +180,13 @@ impl PTYImpl for WinPTY {
 
             let empty_handle = HANDLE(0);
             let conin_res = CreateFileW(
-                PCWSTR(conin_name as *const u16), FILE_GENERIC_WRITE.0, FILE_SHARE_NONE, None,
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, empty_handle
+                PCWSTR(conin_name as *const u16),
+                FILE_GENERIC_WRITE.0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                empty_handle,
             );
 
             if let Err(err) = conin_res {
@@ -182,8 +197,13 @@ impl PTYImpl for WinPTY {
             }
 
             let conout_res = CreateFileW(
-                PCWSTR(conout_name as *mut u16), FILE_GENERIC_READ.0, FILE_SHARE_NONE, None,
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, empty_handle
+                PCWSTR(conout_name as *mut u16),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                empty_handle,
             );
 
             if let Err(err) = conout_res {
@@ -197,11 +217,20 @@ impl PTYImpl for WinPTY {
             let conout = conout_res.unwrap();
 
             let process = PTYProcess::new(conin, conout, false);
-            Ok(Box::new(WinPTY { ptr: pty_ptr, process }) as Box<dyn PTYImpl>)
+            Ok(Box::new(WinPTY {
+                ptr: pty_ptr,
+                process,
+            }) as Box<dyn PTYImpl>)
         }
     }
 
-    fn spawn(&mut self, appname: OsString, cmdline: Option<OsString>, cwd: Option<OsString>, env: Option<OsString>) -> Result<bool, OsString> {
+    fn spawn(
+        &mut self,
+        appname: OsString,
+        cmdline: Option<OsString>,
+        cwd: Option<OsString>,
+        env: Option<OsString>,
+    ) -> Result<bool, OsString> {
         let mut environ: *const u16 = ptr::null();
         let mut working_dir: *const u16 = ptr::null_mut();
         let mut cmd: *const u16 = ptr::null_mut();
@@ -238,17 +267,17 @@ impl PTYImpl for WinPTY {
             Ok(handle) => {
                 self.process.set_process(handle, true);
                 Ok(true)
-            },
-            Err(err) => {
-                Err(err)
             }
+            Err(err) => Err(err),
         }
     }
 
     fn set_size(&self, cols: i32, rows: i32) -> Result<(), OsString> {
         if cols <= 0 || rows <= 0 {
             let err: OsString = OsString::from(format!(
-                "PTY cols and rows must be positive and non-zero. Got: ({}, {})", cols, rows));
+                "PTY cols and rows must be positive and non-zero. Got: ({}, {})",
+                cols, rows
+            ));
             return Err(err);
         }
         self.ptr.set_size(cols, rows)
@@ -280,6 +309,14 @@ impl PTYImpl for WinPTY {
 
     fn get_fd(&self) -> isize {
         self.process.get_fd()
+    }
+
+    fn get_conin_fd(&self) -> isize {
+        self.process.get_conin_fd()
+    }
+
+    fn get_conout_fd(&self) -> isize {
+        self.process.get_conout_fd()
     }
 }
 

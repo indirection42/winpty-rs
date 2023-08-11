@@ -1,24 +1,27 @@
+use windows::core::{Error, HRESULT, PCSTR};
 /// Base struct used to generalize some of the PTY I/O operations.
-
-use windows::Win32::Foundation::{HANDLE, S_OK, STATUS_PENDING, CloseHandle, WAIT_FAILED, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, STATUS_PENDING, S_OK, WAIT_FAILED, WAIT_TIMEOUT,
+};
+use windows::Win32::Globalization::{
+    MultiByteToWideChar, WideCharToMultiByte, CP_UTF8, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+};
 use windows::Win32::Storage::FileSystem::{GetFileSizeEx, ReadFile, WriteFile};
 use windows::Win32::System::Pipes::PeekNamedPipe;
-use windows::Win32::System::IO::{CancelIoEx};
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
-use windows::Win32::Globalization::{MultiByteToWideChar, WideCharToMultiByte, CP_UTF8, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
-use windows::core::{HRESULT, Error, PCSTR};
+use windows::Win32::System::IO::CancelIoEx;
 
+use std::cmp::min;
+use std::ffi::OsString;
+use std::mem::MaybeUninit;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::prelude::*;
 use std::ptr;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::mem::MaybeUninit;
-use std::cmp::min;
-use std::ffi::{OsString};
-#[cfg(windows)]
-use std::os::windows::prelude::*;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 #[cfg(unix)]
 use std::vec::IntoIter;
 
@@ -28,7 +31,6 @@ use super::PTYArgs;
 trait OsStrExt {
     fn from_wide(x: &[u16]) -> OsString;
     fn encode_wide(&self) -> IntoIter<u16>;
-
 }
 
 #[cfg(unix)]
@@ -53,20 +55,27 @@ pub trait PTYImpl: Sync + Send {
     /// * `pty`: The instantiated PTY struct.
     #[allow(clippy::new_ret_no_self)]
     fn new(args: &PTYArgs) -> Result<Box<dyn PTYImpl>, OsString>
-        where Self: Sized;
+    where
+        Self: Sized;
 
     /// Spawn a process inside the PTY.
-	///
-	/// # Arguments
-	/// * `appname` - Full path to the executable binary to spawn.
-	/// * `cmdline` - Optional space-delimited arguments to provide to the executable.
-	/// * `cwd` - Optional path from where the executable should be spawned.
-	/// * `env` - Optional environment variables to provide to the process. Each
-	/// variable should be declared as `VAR=VALUE` and be separated by a NUL (0) character.
-	///
-	/// # Returns
-	/// `true` if the call was successful, else an error will be returned.
-    fn spawn(&mut self, appname: OsString, cmdline: Option<OsString>, cwd: Option<OsString>, env: Option<OsString>) -> Result<bool, OsString>;
+    ///
+    /// # Arguments
+    /// * `appname` - Full path to the executable binary to spawn.
+    /// * `cmdline` - Optional space-delimited arguments to provide to the executable.
+    /// * `cwd` - Optional path from where the executable should be spawned.
+    /// * `env` - Optional environment variables to provide to the process. Each
+    /// variable should be declared as `VAR=VALUE` and be separated by a NUL (0) character.
+    ///
+    /// # Returns
+    /// `true` if the call was successful, else an error will be returned.
+    fn spawn(
+        &mut self,
+        appname: OsString,
+        cmdline: Option<OsString>,
+        cwd: Option<OsString>,
+        env: Option<OsString>,
+    ) -> Result<bool, OsString>;
 
     /// Change the PTY size.
     ///
@@ -120,11 +129,19 @@ pub trait PTYImpl: Sync + Send {
     fn get_pid(&self) -> u32;
 
     /// Retrieve the process handle ID of the spawned program.
-	fn get_fd(&self) -> isize;
+    fn get_fd(&self) -> isize;
+
+    fn get_conin_fd(&self) -> isize;
+
+    fn get_conout_fd(&self) -> isize;
 }
 
-
-fn read(mut length: u32, blocking: bool, stream: HANDLE, using_pipes: bool) -> Result<OsString, OsString> {
+fn read(
+    mut length: u32,
+    blocking: bool,
+    stream: HANDLE,
+    using_pipes: bool,
+) -> Result<OsString, OsString> {
     let mut result: HRESULT;
     if !blocking {
         if using_pipes {
@@ -136,15 +153,11 @@ fn read(mut length: u32, blocking: bool, stream: HANDLE, using_pipes: bool) -> R
                 let bytes_ptr = ptr::addr_of_mut!(*bytes_u.as_mut_ptr());
                 let bytes_ref = bytes_ptr.as_mut().unwrap();
 
-                result =
-                    if PeekNamedPipe(stream, None,
-                                     0, Some(bytes_ref),
-                                     None, None).as_bool() {
-                        S_OK
-                    } else {
-                        Error::from_win32().into()
-                    };
-
+                result = if PeekNamedPipe(stream, None, 0, Some(bytes_ref), None, None).as_bool() {
+                    S_OK
+                } else {
+                    Error::from_win32().into()
+                };
 
                 if result.is_err() {
                     let result_msg = result.message();
@@ -164,7 +177,11 @@ fn read(mut length: u32, blocking: bool, stream: HANDLE, using_pipes: bool) -> R
                 let size_ptr = ptr::addr_of_mut!(*size.as_mut_ptr());
                 let size_ref = size_ptr.as_mut().unwrap();
                 // let size_ref = *size.as_mut_ptr();
-                result = if GetFileSizeEx(stream, size_ref).as_bool() { S_OK } else { Error::from_win32().into() };
+                result = if GetFileSizeEx(stream, size_ref).as_bool() {
+                    S_OK
+                } else {
+                    Error::from_win32().into()
+                };
 
                 if result.is_err() {
                     let result_msg = result.message();
@@ -186,35 +203,39 @@ fn read(mut length: u32, blocking: bool, stream: HANDLE, using_pipes: bool) -> R
     //let chars_read: *mut u32 = ptr::null_mut();
     // println!("Length: {}, {}", length, length > 0);
     // if length > 0 {
-        unsafe {
-            match length {
-                0 => {
+    unsafe {
+        match length {
+            0 => {}
+            _ => {
+                // let chars_read_ptr = chars_read.as_mut_ptr();
+                let chars_read_ptr = ptr::addr_of_mut!(*chars_read.as_mut_ptr());
+                // let chars_read_mut = chars_read_ptr.as_mut();
+                let chars_read_mut = Some(chars_read_ptr);
+                // println!("Blocked here");
+                result = if ReadFile(
+                    stream,
+                    Some(buf_vec.as_mut_ptr() as _),
+                    length,
+                    chars_read_mut,
+                    None,
+                )
+                .as_bool()
+                {
+                    S_OK
+                } else {
+                    Error::from_win32().into()
+                };
+                // println!("Unblocked here");
 
-                }
-                _ => {
-                    // let chars_read_ptr = chars_read.as_mut_ptr();
-                    let chars_read_ptr = ptr::addr_of_mut!(*chars_read.as_mut_ptr());
-                    // let chars_read_mut = chars_read_ptr.as_mut();
-                    let chars_read_mut = Some(chars_read_ptr);
-                    // println!("Blocked here");
-                    result =
-                        if ReadFile(stream, Some(buf_vec.as_mut_ptr() as _),
-                                    length, chars_read_mut, None).as_bool() {
-                            S_OK
-                        } else {
-                            Error::from_win32().into()
-                        };
-                    // println!("Unblocked here");
-
-                    if result.is_err() {
-                        let result_msg = result.message();
-                        let err_msg: &[u16] = result_msg.as_wide();
-                        let string = OsString::from_wide(err_msg);
-                        return Err(string);
-                    }
+                if result.is_err() {
+                    let result_msg = result.message();
+                    let err_msg: &[u16] = result_msg.as_wide();
+                    let string = OsString::from_wide(err_msg);
+                    return Err(string);
                 }
             }
         }
+    }
     // }
 
     // let os_str = OsString::with_capacity(buf_vec.len());
@@ -222,20 +243,23 @@ fn read(mut length: u32, blocking: bool, stream: HANDLE, using_pipes: bool) -> R
 
     unsafe {
         MultiByteToWideChar(
-            CP_UTF8, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), &buf_vec[..],
-            Some(&mut vec_buf[..]));
+            CP_UTF8,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            &buf_vec[..],
+            Some(&mut vec_buf[..]),
+        );
     }
 
     // let non_zeros: Vec<u16> = vec_buf.split(|elem| *elem == 0 as u16).collect();
     let non_zeros_init = Vec::new();
     let non_zeros: Vec<u16> =
         vec_buf
-        .split(|x| x == &0)
-        .map(|x| x.to_vec())
-        .fold(non_zeros_init, |mut acc, mut x| {
-            acc.append(&mut x);
-            acc
-        });
+            .split(|x| x == &0)
+            .map(|x| x.to_vec())
+            .fold(non_zeros_init, |mut acc, mut x| {
+                acc.append(&mut x);
+                acc
+            });
     // let non_zeros: &[u16] = non_zeros_slices.into_iter().reduce(|acc, item| [acc, item].concat()).unwrap();
     let os_str = OsString::from_wide(&non_zeros[..]);
     Ok(os_str)
@@ -290,8 +314,7 @@ fn is_eof(process: HANDLE, stream: HANDLE) -> Result<bool, OsString> {
     unsafe {
         let bytes_ptr: *mut u32 = ptr::addr_of_mut!(*bytes.as_mut_ptr());
         let bytes_ref = Some(bytes_ptr);
-        let succ = PeekNamedPipe(
-            stream, None, 0, None, bytes_ref, None).as_bool();
+        let succ = PeekNamedPipe(stream, None, 0, None, bytes_ref, None).as_bool();
 
         let total_bytes = bytes.assume_init();
         if succ {
@@ -299,8 +322,8 @@ fn is_eof(process: HANDLE, stream: HANDLE) -> Result<bool, OsString> {
                 Ok(alive) => {
                     let eof = !alive && total_bytes == 0;
                     Ok(eof)
-                },
-                Err(_) => Ok(true)
+                }
+                Err(_) => Ok(true),
             }
         } else {
             Ok(true)
@@ -364,7 +387,10 @@ impl PTYProcess {
                 // let mut alive = reader_alive_rx.recv_timeout(Duration::from_millis(300)).unwrap_or(true);
                 // alive = alive && !is_eof(process, conout).unwrap();
 
-                while reader_alive_rx.recv_timeout(Duration::from_millis(100)).unwrap_or(true) {
+                while reader_alive_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap_or(true)
+                {
                     if !is_eof(process, conout).unwrap() {
                         let result = read(4096, true, conout, using_pipes);
                         reader_out_tx.send(Some(result)).unwrap();
@@ -383,7 +409,10 @@ impl PTYProcess {
 
         let cache_thread = thread::spawn(move || {
             let mut read_buf = OsString::new();
-            while cache_alive_rx.recv_timeout(Duration::from_millis(100)).unwrap_or(true) {
+            while cache_alive_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap_or(true)
+            {
                 if let Ok(Some((length, blocking))) = cache_req_rx.recv() {
                     let mut pending_read: Option<OsString> = None;
 
@@ -391,28 +420,21 @@ impl PTYProcess {
                         pending_read = Some(OsString::new());
                     }
 
-                    let out =
-                        match pending_read {
-                            Some(bytes) => Ok(bytes),
-                            None => {
-                                match blocking {
-                                    true => {
-                                        match reader_out_rx.recv() {
-                                            Ok(None) => Err(OsString::from("Standard out reached EOF")),
-                                            Ok(Some(bytes)) => bytes,
-                                            Err(_) => Ok(OsString::new())
-                                        }
-                                    },
-                                    false => {
-                                        match reader_out_rx.recv_timeout(Duration::from_millis(200)) {
-                                            Ok(None) => Err(OsString::from("Standard out reached EOF")),
-                                            Ok(Some(bytes)) => bytes,
-                                            Err(_) => Ok(OsString::new())
-                                        }
-                                    }
-                                }
-                            }
-                        };
+                    let out = match pending_read {
+                        Some(bytes) => Ok(bytes),
+                        None => match blocking {
+                            true => match reader_out_rx.recv() {
+                                Ok(None) => Err(OsString::from("Standard out reached EOF")),
+                                Ok(Some(bytes)) => bytes,
+                                Err(_) => Ok(OsString::new()),
+                            },
+                            false => match reader_out_rx.recv_timeout(Duration::from_millis(200)) {
+                                Ok(None) => Err(OsString::from("Standard out reached EOF")),
+                                Ok(Some(bytes)) => bytes,
+                                Err(_) => Ok(OsString::new()),
+                            },
+                        },
+                    };
 
                     match out {
                         Ok(bytes) => {
@@ -423,8 +445,10 @@ impl PTYProcess {
                             let to_return = OsString::from_wide(left);
                             read_buf = OsString::from_wide(right);
                             cache_resp_tx.send(Ok(to_return)).unwrap();
-                        },
-                        Err(err) => { cache_resp_tx.send(Err(err)).unwrap(); }
+                        }
+                        Err(err) => {
+                            cache_resp_tx.send(Err(err)).unwrap();
+                        }
                     }
                 }
             }
@@ -470,7 +494,7 @@ impl PTYProcess {
         match self.cache_resp.recv() {
             Ok(Ok(bytes)) => Ok(bytes),
             Ok(Err(err)) => Err(err),
-            Err(err) => Err(err.to_string().into())
+            Err(err) => Err(err.to_string().into()),
         }
         // let out = self.reader_in.recv().unwrap();
         // out
@@ -490,27 +514,37 @@ impl PTYProcess {
 
         unsafe {
             let required_size = WideCharToMultiByte(
-                CP_UTF8, 0, &vec_buf[..], None,
-                PCSTR(ptr::null_mut::<u8>()), None);
+                CP_UTF8,
+                0,
+                &vec_buf[..],
+                None,
+                PCSTR(ptr::null_mut::<u8>()),
+                None,
+            );
 
-            let mut bytes_buf: Vec<u8> = std::iter::repeat(0).take((required_size) as usize).collect();
+            let mut bytes_buf: Vec<u8> = std::iter::repeat(0)
+                .take((required_size) as usize)
+                .collect();
 
             WideCharToMultiByte(
-                CP_UTF8, 0, &vec_buf[..], Some(&mut bytes_buf[..]),
+                CP_UTF8,
+                0,
+                &vec_buf[..],
+                Some(&mut bytes_buf[..]),
                 PCSTR(ptr::null_mut::<u8>()),
-                None);
+                None,
+            );
 
             let mut written_bytes = MaybeUninit::<u32>::uninit();
             let bytes_ptr: *mut u32 = ptr::addr_of_mut!(*written_bytes.as_mut_ptr());
             let bytes_ref = Some(bytes_ptr);
             // let bytes_ref = bytes_ptr.as_mut();
 
-            result =
-                if WriteFile(self.conin, Some(&bytes_buf[..]), bytes_ref, None).as_bool() {
-                    S_OK
-                } else {
-                    Error::from_win32().into()
-                };
+            result = if WriteFile(self.conin, Some(&bytes_buf[..]), bytes_ref, None).as_bool() {
+                S_OK
+            } else {
+                Error::from_win32().into()
+            };
 
             if result.is_err() {
                 let result_msg = result.message();
@@ -536,19 +570,17 @@ impl PTYProcess {
         unsafe {
             let bytes_ptr: *mut u32 = ptr::addr_of_mut!(*bytes.as_mut_ptr());
             let bytes_ref = Some(bytes_ptr);
-            let mut succ = PeekNamedPipe(
-                self.conout, None, 0, bytes_ref, None, None).as_bool();
+            let mut succ = PeekNamedPipe(self.conout, None, 0, bytes_ref, None, None).as_bool();
 
             let total_bytes = bytes.assume_init();
 
             if succ {
-                let is_alive =
-                    match self.is_alive() {
-                        Ok(alive) => alive,
-                        Err(err) => {
-                            return Err(err);
-                        }
-                    };
+                let is_alive = match self.is_alive() {
+                    Ok(alive) => alive,
+                    Err(err) => {
+                        return Err(err);
+                    }
+                };
 
                 if total_bytes == 0 && !is_alive {
                     succ = false;
@@ -557,7 +589,6 @@ impl PTYProcess {
 
             Ok(!succ)
         }
-
     }
 
     /// Retrieve the exit status of the process
@@ -571,7 +602,7 @@ impl PTYProcess {
 
         match get_exitstatus(self.process) {
             Ok(exitstatus) => Ok(exitstatus),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
@@ -580,10 +611,8 @@ impl PTYProcess {
         // let mut exit_code: Box<u32> = Box::new_uninit();
         // let exit_ptr: *mut u32 = &mut *exit_code;
         match is_alive(self.process) {
-            Ok(alive) => {
-                Ok(alive)
-            },
-            Err(err) => Err(err)
+            Ok(alive) => Ok(alive),
+            Err(err) => Err(err),
         }
     }
 
@@ -615,23 +644,30 @@ impl PTYProcess {
     }
 
     /// Retrieve the process handle ID of the spawned program.
-	pub fn get_fd(&self) -> isize {
+    pub fn get_fd(&self) -> isize {
         self.process.0
     }
 
+    pub fn get_conin_fd(&self) -> isize {
+        self.conin.0
+    }
+
+    pub fn get_conout_fd(&self) -> isize {
+        self.conout.0
+    }
 }
 
 impl Drop for PTYProcess {
     fn drop(&mut self) {
         unsafe {
             // Unblock thread if it is waiting for a process handle.
-            if self.reader_process_out.send(None).is_ok() { }
+            if self.reader_process_out.send(None).is_ok() {}
 
             // Cancel all pending IO operations on conout
             CancelIoEx(self.conout, None);
 
             // Send instruction to thread to finish
-            if self.reader_alive.send(false).is_ok() { }
+            if self.reader_alive.send(false).is_ok() {}
 
             // Wait for the thread to be down
             if let Some(thread_handle) = self.reading_thread.take() {
