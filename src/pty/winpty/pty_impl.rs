@@ -45,11 +45,18 @@ impl WinPTYPtr {
         cwd: *const u16,
         env: *const u16,
     ) -> Result<HANDLE, OsString> {
-        let mut err_ptr: *mut winpty_error_ptr_t = ptr::null_mut();
+        let mut err_ptr: winpty_error_ptr_t = ptr::null_mut();
         unsafe {
-            let spawn_config = winpty_spawn_config_new(3u64, appname, cmdline, cwd, env, err_ptr);
+            let spawn_config = winpty_spawn_config_new(
+                3u64,
+                appname,
+                cmdline,
+                cwd,
+                env,
+                &mut err_ptr as *mut winpty_error_ptr_t,
+            );
             if spawn_config.is_null() {
-                return Err(get_error_message(err_ptr));
+                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
             }
 
             err_ptr = ptr::null_mut();
@@ -66,11 +73,11 @@ impl WinPTYPtr {
                 ptr::addr_of_mut!(handle),
                 ptr::null_mut::<_>(),
                 ptr::null_mut::<u32>(),
-                err_ptr,
+                &mut err_ptr as *mut winpty_error_ptr_t,
             );
             winpty_spawn_config_free(spawn_config);
             if !succ {
-                return Err(get_error_message(err_ptr));
+                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
             }
 
             handle_value.assume_init();
@@ -80,11 +87,16 @@ impl WinPTYPtr {
     }
 
     pub fn set_size(&self, cols: i32, rows: i32) -> Result<(), OsString> {
-        let err_ptr: *mut winpty_error_ptr_t = ptr::null_mut();
+        let mut err_ptr: winpty_error_ptr_t = ptr::null_mut();
         unsafe {
-            let succ = winpty_set_size(self.ptr, cols, rows, err_ptr);
+            let succ = winpty_set_size(
+                self.ptr,
+                cols,
+                rows,
+                &mut err_ptr as *mut winpty_error_ptr_t,
+            );
             if !succ {
-                return Err(get_error_message(err_ptr));
+                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
             }
         }
         Ok(())
@@ -142,12 +154,15 @@ impl PTYImpl for WinPTY {
         unsafe {
             //let mut err: Box<winpty_error_t> = Box::new_uninit();
             //let mut err_ptr: *mut winpty_error_t = &mut *err;
-            let mut err_ptr: *mut winpty_error_ptr_t = ptr::null_mut();
-            let config = winpty_config_new(args.agent_config.bits(), err_ptr);
+            let mut err_ptr: winpty_error_ptr_t = ptr::null_mut();
+            let config = winpty_config_new(
+                args.agent_config.bits(),
+                &mut err_ptr as *mut winpty_error_ptr_t,
+            );
             //err.assume_init();
 
             if config.is_null() {
-                return Err(get_error_message(err_ptr));
+                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
             }
 
             if args.cols <= 0 || args.rows <= 0 {
@@ -166,11 +181,11 @@ impl PTYImpl for WinPTY {
             // err_ptr = &mut *err;
             err_ptr = ptr::null_mut();
 
-            let pty_ref = winpty_open(config, err_ptr);
+            let pty_ref = winpty_open(config, &mut err_ptr as *mut winpty_error_ptr_t);
             winpty_config_free(config);
 
             if pty_ref.is_null() {
-                return Err(get_error_message(err_ptr));
+                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
             }
 
             let pty_ptr = WinPTYPtr { ptr: pty_ref };
