@@ -131,7 +131,7 @@ unsafe impl Sync for WinPTYPtr {}
 // fn from<'a>(_: &'a WinPTYPtr, handle: *const )
 
 unsafe fn get_error_message(err_ptr: *mut winpty_error_ptr_t) -> OsString {
-    let err_msg: *const u16 = winpty_error_msg(err_ptr);
+    let err_msg: *const u16 = winpty_error_msg(*err_ptr);
     let mut size = 0;
     let mut ptr = err_msg;
     while *ptr != 0 {
@@ -139,8 +139,12 @@ unsafe fn get_error_message(err_ptr: *mut winpty_error_ptr_t) -> OsString {
         ptr = ptr.wrapping_offset(1);
     }
     let msg_slice: &[u16] = from_raw_parts(err_msg, size);
-    winpty_error_free(err_ptr);
-    OsString::from_wide(msg_slice)
+    if err_msg != ptr::null() {
+        OsString::from_wide(msg_slice)
+    } else {
+        winpty_error_free(*err_ptr);
+        OsString::from("Unknown error")
+    }
 }
 
 /// FFi-safe wrapper around `winpty` library calls and objects.
