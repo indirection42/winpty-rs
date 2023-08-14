@@ -67,17 +67,24 @@ impl WinPTYPtr {
             let mut handle = ptr::addr_of_mut!((*handle_value.as_mut_ptr())) as *mut c_void;
             //let handle_value = process.0 as *mut c_void;
             //let process: *mut *mut  = ptr::null_mut();
+            let mut os_error: u32 = 0;
             let succ = winpty_spawn(
                 self.ptr,
                 spawn_config,
                 ptr::addr_of_mut!(handle),
                 ptr::null_mut::<_>(),
-                ptr::null_mut::<u32>(),
+                &mut os_error as *mut u32,
                 &mut err_ptr as *mut winpty_error_ptr_t,
             );
             winpty_spawn_config_free(spawn_config);
             if !succ {
-                return Err(get_error_message(&mut err_ptr as *mut winpty_error_ptr_t));
+                let wide_buf = format!(" os error {}", os_error)
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                let os_err_str = OsString::from_wide(&wide_buf);
+                let mut error_msg = get_error_message(&mut err_ptr as *mut winpty_error_ptr_t);
+                error_msg.push(os_err_str);
+                return Err(error_msg);
             }
 
             handle_value.assume_init();
