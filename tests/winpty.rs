@@ -1,5 +1,3 @@
-#![cfg(feature = "winpty")]
-
 use regex::Regex;
 use std::env;
 use std::ffi::OsString;

@@ -1,5 +1,3 @@
-#![cfg(feature = "conpty")]
-
 use regex::Regex;
 use std::ffi::OsString;
 use std::{thread, time};

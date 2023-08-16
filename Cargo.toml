@@ -47,12 +47,6 @@ regex = "1.5"
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]
 
-[features]
-conpty = []
-winpty = []
-winpty_example = ["winpty"]
-conpty_example = ["conpty"]
-
 [lib]
 name = "winptyrs"
 path = "src/lib.rs"
@@ -60,9 +54,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "winpty_example"
 path = "src/examples/winpty.rs"
-required-features = ["winpty_example"]
 
 [[bin]]
 name = "conpty_example"
 path = "src/examples/conpty.rs"
-required-features = ["conpty_example"]
