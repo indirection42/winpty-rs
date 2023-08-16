@@ -113,7 +113,7 @@ fn main() {
         let major_version = command_output(
             Command::new("Reg")
                 .arg("Query")
-                .arg(&reg_entry)
+                .arg(reg_entry)
                 .arg("/v")
                 .arg("CurrentMajorVersionNumber"),
         );
@@ -124,7 +124,7 @@ fn main() {
         let build_version = command_output(
             Command::new("Reg")
                 .arg("Query")
-                .arg(&reg_entry)
+                .arg(reg_entry)
                 .arg("/v")
                 .arg("CurrentBuildNumber"),
         );
@@ -134,7 +134,6 @@ fn main() {
         println!("Windows major version: {:?}", major_version);
         println!("Windows build number: {:?}", build_version);
 
-        #[cfg(feature = "conpty")]
         {
             use windows::core::HSTRING;
             use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -157,7 +156,6 @@ fn main() {
         }
 
         // Check if winpty is installed
-        #[cfg(feature = "winpty")]
         {
             use which::which;
             let mut cmd = Command::new("winpty-agent");

@@ -1,17 +1,16 @@
-use windows::core::HRESULT;
+#![allow(non_snake_case)]
 /// Actual ConPTY implementation.
-use windows::core::{Error, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, S_OK};
+use windows::core::{Error, HRESULT, HSTRING, PCSTR, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, INVALID_HANDLE_VALUE, S_OK};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Console::{
-    AllocConsole, ClosePseudoConsole, CreatePseudoConsole, FreeConsole, GetConsoleMode,
-    GetConsoleWindow, ResizePseudoConsole, SetConsoleMode, SetStdHandle, CONSOLE_MODE, COORD,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, HPCON, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE,
+    CONSOLE_MODE, COORD, ENABLE_VIRTUAL_TERMINAL_PROCESSING, HPCON, STD_ERROR_HANDLE, STD_HANDLE,
+    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
@@ -29,6 +28,68 @@ use std::{mem, ptr};
 use crate::pty::PTYArgs;
 use crate::pty::{PTYImpl, PTYProcess};
 
+lazy_static::lazy_static! {
+    static ref CONSOLE_OPT: ConsoleOpt =  {
+        let kernal_32 = unsafe { GetModuleHandleW(&HSTRING::from("kernel32.dll")).unwrap()};
+        ConsoleOpt {
+            alloc_console : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("AllocConsole\0".as_ptr())))
+            },
+            create_pseudo_console : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("CreatePseudoConsole\0".as_ptr())))
+            },
+            close_pseudo_console : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("ClosePseudoConsole\0".as_ptr())))
+            },
+            resize_pseudo_console : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("ResizePseudoConsole\0".as_ptr())))
+            } ,
+            free_console : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("FreeConsole\0".as_ptr())))
+            },
+            get_console_mode : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("GetConsoleMode\0".as_ptr())))
+            },
+            set_console_mode : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("SetConsoleMode\0".as_ptr())))
+            },
+            get_console_window : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("GetConsoleWindow\0".as_ptr())))
+            },
+            set_std_handle : unsafe {
+                std::mem::transmute(GetProcAddress(kernal_32, PCSTR("SetStdHandle\0".as_ptr())))
+            },
+        }
+    };
+}
+
+struct ConsoleOpt {
+    alloc_console: Option<unsafe extern "system" fn() -> BOOL>,
+    create_pseudo_console:
+        Option<unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT>,
+    close_pseudo_console: Option<unsafe extern "system" fn(HPCON)>,
+    resize_pseudo_console: Option<unsafe extern "system" fn(HPCON, COORD) -> HRESULT>,
+    free_console: Option<unsafe extern "system" fn() -> BOOL>,
+    get_console_mode: Option<unsafe extern "system" fn(HANDLE, *mut CONSOLE_MODE) -> BOOL>,
+    set_console_mode: Option<unsafe extern "system" fn(HANDLE, CONSOLE_MODE) -> BOOL>,
+    get_console_window: Option<unsafe extern "system" fn() -> HWND>,
+    set_std_handle: Option<unsafe extern "system" fn(STD_HANDLE, HANDLE) -> BOOL>,
+}
+
+impl ConsoleOpt {
+    pub fn any_none(&self) -> bool {
+        self.alloc_console.is_none()
+            || self.create_pseudo_console.is_none()
+            || self.close_pseudo_console.is_none()
+            || self.resize_pseudo_console.is_none()
+            || self.free_console.is_none()
+            || self.get_console_mode.is_none()
+            || self.set_console_mode.is_none()
+            || self.get_console_window.is_none()
+            || self.set_std_handle.is_none()
+    }
+}
+
 /// Struct that contains the required information to spawn a console
 /// using the Windows API `CreatePseudoConsole` call.
 pub struct ConPTY {
@@ -44,6 +105,18 @@ unsafe impl Sync for ConPTY {}
 
 impl PTYImpl for ConPTY {
     fn new(args: &PTYArgs) -> Result<Box<dyn PTYImpl>, OsString> {
+        if CONSOLE_OPT.any_none() {
+            return Err(OsString::from(
+                "ConPTY is not supported on this version of Windows.",
+            ));
+        }
+        let AllocConsole = CONSOLE_OPT.alloc_console.unwrap();
+        let CreatePseudoConsole = CONSOLE_OPT.create_pseudo_console.unwrap();
+        let SetConsoleMode = CONSOLE_OPT.set_console_mode.unwrap();
+        let GetConsoleMode = CONSOLE_OPT.get_console_mode.unwrap();
+        let GetConsoleWindow = CONSOLE_OPT.get_console_window.unwrap();
+        let SetStdHandle = CONSOLE_OPT.set_std_handle.unwrap();
+
         let mut result: HRESULT;
         if args.cols <= 0 || args.rows <= 0 {
             let err: OsString = OsString::from(format!(
@@ -212,16 +285,21 @@ impl PTYImpl for ConPTY {
                 return Err(string);
             }
 
-            let pty_handle = match CreatePseudoConsole(size, input_read_side, output_write_side, 0)
+            let mut pty_handle = HPCON::default();
+            if let Err(e) = CreatePseudoConsole(
+                size,
+                input_read_side,
+                output_write_side,
+                0,
+                &mut pty_handle as *mut HPCON,
+            )
+            .ok()
             {
-                Ok(pty) => pty,
-                Err(err) => {
-                    let result_msg = err.message();
-                    let err_msg: &[u16] = result_msg.as_wide();
-                    let string = OsString::from_wide(err_msg);
-                    return Err(string);
-                }
-            };
+                let result_msg = e.message();
+                let err_msg: &[u16] = result_msg.as_wide();
+                let string = OsString::from_wide(err_msg);
+                return Err(string);
+            }
 
             CloseHandle(input_read_side);
             CloseHandle(output_write_side);
@@ -371,6 +449,12 @@ impl PTYImpl for ConPTY {
     }
 
     fn set_size(&self, cols: i32, rows: i32) -> Result<(), OsString> {
+        if CONSOLE_OPT.any_none() {
+            return Err(OsString::from(
+                "ConPTY is not supported on this version of Windows.",
+            ));
+        }
+        let ResizePseudoConsole = CONSOLE_OPT.resize_pseudo_console.unwrap();
         if cols <= 0 || rows <= 0 {
             let err: OsString = OsString::from(format!(
                 "PTY cols and rows must be positive and non-zero. Got: ({}, {})",
@@ -384,7 +468,7 @@ impl PTYImpl for ConPTY {
             Y: rows as i16,
         };
         unsafe {
-            match ResizePseudoConsole(self.handle, size) {
+            match ResizePseudoConsole(self.handle, size).ok() {
                 Ok(_) => Ok(()),
                 Err(err) => {
                     let result_msg = err.message();
@@ -436,6 +520,11 @@ impl PTYImpl for ConPTY {
 impl Drop for ConPTY {
     fn drop(&mut self) {
         unsafe {
+            if CONSOLE_OPT.any_none() {
+                return;
+            }
+            let ClosePseudoConsole = CONSOLE_OPT.close_pseudo_console.unwrap();
+            let FreeConsole = CONSOLE_OPT.free_console.unwrap();
             if !self.process_info.hThread.is_invalid() {
                 CloseHandle(self.process_info.hThread);
             }
@@ -445,7 +534,10 @@ impl Drop for ConPTY {
             }
 
             DeleteProcThreadAttributeList(self.startup_info.lpAttributeList);
-            ClosePseudoConsole(self.handle);
+
+            if !self.handle.is_invalid() {
+                ClosePseudoConsole(self.handle);
+            }
 
             if self.console_allocated {
                 FreeConsole();
